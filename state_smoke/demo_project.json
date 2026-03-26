@@ -1,0 +1,18 @@
+{
+  "project_name": "demo_project",
+  "assets_dir": "demo_project_assets",
+  "networks": [
+    {
+      "name": "test_network",
+      "asset_path": "test_network.s2p",
+      "n_ports": 2,
+      "z0": 50.0,
+      "metadata": {}
+    }
+  ],
+  "latest_deembedded_name": null,
+  "ui_state": {
+    "method": "Single-line TRL",
+    "gate_mode": "bandstop"
+  }
+}
