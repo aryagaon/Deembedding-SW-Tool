@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
@@ -23,6 +24,8 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSplitter,
     QTabWidget,
     QToolBar,
@@ -41,6 +44,9 @@ from rfdeembed import (
     PlotGenerator,
     ProjectStateManager,
     ValidationChecks,
+    P3702xThruDeembedder,
+    P370Config,
+    P370Inputs,
 )
 
 
@@ -131,16 +137,26 @@ class DeembedMainWindow(QMainWindow):
 
         self.networks: Dict[str, SParameterData] = {}
         self.latest_trl_result = None
+        self.latest_p370_result = None
         self.latest_deembedded_name: Optional[str] = None
         self.latest_validation_report = None
         self.plot_limits_dialog: Optional[PlotLimitsDialog] = None
 
         self.trl_engine = TRLDeembedder()
+        self.p370_engine = P3702xThruDeembedder()
         self.time_gating = TimeGating()
         self.plotter = PlotGenerator()
         self.project_manager = ProjectStateManager()
 
-        self.resize(1680, 1020)
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            width = min(1680, max(1100, available.width() - 60))
+            height = min(1020, max(700, available.height() - 80))
+            self.resize(width, height)
+        else:
+            self.resize(1400, 900)
+        self.setMinimumSize(900, 620)
         self._update_window_title()
 
         self._build_ui()
@@ -158,25 +174,40 @@ class DeembedMainWindow(QMainWindow):
         main_layout = QVBoxLayout(central)
 
         splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
         main_layout.addWidget(splitter, 1)
 
         left_panel = QWidget()
+        left_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(6, 6, 6, 6)
+        left_layout.setSpacing(8)
         left_layout.addWidget(self._build_file_import_group())
         left_layout.addWidget(self._build_method_group())
         left_layout.addWidget(self._build_gating_group())
         left_layout.addWidget(self._build_validation_group())
         left_layout.addStretch(1)
 
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        left_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        left_scroll.setFrameShape(QScrollArea.NoFrame)
+        left_scroll.setWidget(left_panel)
+        left_scroll.setMinimumWidth(360)
+
         right_panel = QWidget()
+        right_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(6, 6, 6, 6)
         right_layout.addWidget(self._build_plot_tabs(), 1)
+        right_panel.setMinimumWidth(420)
 
-        splitter.addWidget(left_panel)
+        splitter.addWidget(left_scroll)
         splitter.addWidget(right_panel)
-        splitter.setSizes([460, 1220])
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([420, 980])
 
         self.status_label = QLabel("Ready")
         self.statusBar().addWidget(self.status_label, 1)
@@ -241,6 +272,10 @@ class DeembedMainWindow(QMainWindow):
     def _build_method_group(self) -> QGroupBox:
         group = QGroupBox("2) Method Selection / TRL Setup")
         layout = QFormLayout(group)
+        layout.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        layout.setFormAlignment(Qt.AlignTop | Qt.AlignLeft)
+        layout.setLabelAlignment(Qt.AlignLeft)
 
         self.cmb_method = QComboBox()
         self.cmb_method.addItems([
@@ -248,36 +283,75 @@ class DeembedMainWindow(QMainWindow):
             "Multiline TRL",
             "Short/Long Differential",
             "Known Fixture De-cascade",
+            "IEEE P370 2x-thru (NZC)",
         ])
 
         self.cmb_thru = QComboBox()
         self.cmb_line1 = QComboBox()
         self.cmb_line2 = QComboBox()
         self.cmb_dut = QComboBox()
+        self.cmb_p370_2xthru = QComboBox()
+        self.cmb_p370_fix_dut_fix = QComboBox()
 
         self.edit_line1_len = QLineEdit("0.010")
         self.edit_line2_len = QLineEdit("0.020")
         self.edit_thru_len = QLineEdit("0.0")
         self.chk_mirror_sym = QCheckBox("Assume mirror-symmetric fixture")
         self.chk_mirror_sym.setChecked(True)
+        self.chk_p370_dc = QCheckBox("Allow DC extrapolation for P370")
+        self.chk_p370_dc.setChecked(True)
+        self.chk_p370_trim = QCheckBox("Trim low-end points near cutoff")
+        self.chk_p370_trim.setChecked(False)
+        self.edit_p370_trim_db = QLineEdit("-45")
+        self.lbl_p370_warning = QLabel("")
+        self.lbl_p370_warning.setWordWrap(True)
+        self.lbl_p370_warning.setVisible(False)
+        self.lbl_p370_warning.setStyleSheet(
+            "QLabel { background-color: #fff3cd; color: #7a4b00; border: 1px solid #e0b84b; "
+            "border-radius: 4px; padding: 8px; font-weight: 600; }"
+        )
 
         self.btn_run_trl = QPushButton("Solve / De-embed")
 
+        self.lbl_thru = QLabel("THRU")
+        self.lbl_line1 = QLabel("LINE 1")
+        self.lbl_line1_len = QLabel("LINE 1 length (m)")
+        self.lbl_line2 = QLabel("LINE 2")
+        self.lbl_line2_len = QLabel("LINE 2 length (m)")
+        self.lbl_thru_len = QLabel("THRU length (m)")
+        self.lbl_dut = QLabel("DUT")
+        self.lbl_symmetry = QLabel("Symmetry")
+        self.lbl_p370_2xthru = QLabel("2x-THRU")
+        self.lbl_p370_fix_dut_fix = QLabel("FIX-DUT-FIX")
+        self.lbl_p370_dc = QLabel("P370 DC option")
+        self.lbl_p370_trim = QLabel("P370 cutoff trim")
+        self.lbl_p370_trim_db = QLabel("P370 trim threshold (dB)")
+
         layout.addRow("Method", self.cmb_method)
-        layout.addRow("THRU", self.cmb_thru)
-        layout.addRow("LINE 1", self.cmb_line1)
-        layout.addRow("LINE 1 length (m)", self.edit_line1_len)
-        layout.addRow("LINE 2", self.cmb_line2)
-        layout.addRow("LINE 2 length (m)", self.edit_line2_len)
-        layout.addRow("THRU length (m)", self.edit_thru_len)
-        layout.addRow("DUT", self.cmb_dut)
-        layout.addRow("Symmetry", self.chk_mirror_sym)
+        layout.addRow(self.lbl_thru, self.cmb_thru)
+        layout.addRow(self.lbl_line1, self.cmb_line1)
+        layout.addRow(self.lbl_line1_len, self.edit_line1_len)
+        layout.addRow(self.lbl_line2, self.cmb_line2)
+        layout.addRow(self.lbl_line2_len, self.edit_line2_len)
+        layout.addRow(self.lbl_thru_len, self.edit_thru_len)
+        layout.addRow(self.lbl_dut, self.cmb_dut)
+        layout.addRow(self.lbl_symmetry, self.chk_mirror_sym)
+        layout.addRow(self.lbl_p370_2xthru, self.cmb_p370_2xthru)
+        layout.addRow(self.lbl_p370_fix_dut_fix, self.cmb_p370_fix_dut_fix)
+        layout.addRow(self.lbl_p370_dc, self.chk_p370_dc)
+        layout.addRow(self.lbl_p370_trim, self.chk_p370_trim)
+        layout.addRow(self.lbl_p370_trim_db, self.edit_p370_trim_db)
+        layout.addRow(self.lbl_p370_warning)
         layout.addRow(self.btn_run_trl)
         return group
 
     def _build_gating_group(self) -> QGroupBox:
         group = QGroupBox("3) Gating Controls")
         layout = QFormLayout(group)
+        layout.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        layout.setFormAlignment(Qt.AlignTop | Qt.AlignLeft)
+        layout.setLabelAlignment(Qt.AlignLeft)
 
         self.lbl_gating_hint = QLabel("Tip: use S11 or S22 to place the time gate visually. You do not need line lengths just to preview or adjust the gate.")
         self.lbl_gating_hint.setWordWrap(True)
@@ -335,6 +409,10 @@ class DeembedMainWindow(QMainWindow):
         layout = QVBoxLayout(group)
 
         form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        form.setFormAlignment(Qt.AlignTop | Qt.AlignLeft)
+        form.setLabelAlignment(Qt.AlignLeft)
         self.lbl_validation_target = QLabel("-")
         self.lbl_passivity = QLabel("-")
         self.lbl_reciprocity = QLabel("-")
@@ -404,6 +482,11 @@ class DeembedMainWindow(QMainWindow):
         self.cmb_gate_source.currentIndexChanged.connect(self.refresh_live_plots)
         self.cmb_gate_trace.currentIndexChanged.connect(self.refresh_live_plots)
         self.cmb_method.currentIndexChanged.connect(self._update_method_ui)
+        self.cmb_p370_2xthru.currentIndexChanged.connect(self._update_p370_warning_banner)
+        self.cmb_p370_fix_dut_fix.currentIndexChanged.connect(self._update_p370_warning_banner)
+        self.chk_p370_dc.stateChanged.connect(self._update_p370_warning_banner)
+        self.chk_p370_trim.stateChanged.connect(self._update_p370_warning_banner)
+        self.edit_p370_trim_db.textChanged.connect(self._update_p370_warning_banner)
 
     # ------------------------------------------------------------------
     # Project state
@@ -423,6 +506,11 @@ class DeembedMainWindow(QMainWindow):
             "line1": self.cmb_line1.currentText(),
             "line2": self.cmb_line2.currentText(),
             "dut": self.cmb_dut.currentText(),
+            "p370_2xthru": self.cmb_p370_2xthru.currentText(),
+            "p370_fix_dut_fix": self.cmb_p370_fix_dut_fix.currentText(),
+            "p370_dc": self.chk_p370_dc.isChecked(),
+            "p370_trim": self.chk_p370_trim.isChecked(),
+            "p370_trim_db": self.edit_p370_trim_db.text(),
             "line1_len": self.edit_line1_len.text(),
             "line2_len": self.edit_line2_len.text(),
             "thru_len": self.edit_thru_len.text(),
@@ -458,6 +546,8 @@ class DeembedMainWindow(QMainWindow):
         set_combo(self.cmb_line1, state.get("line1", ""))
         set_combo(self.cmb_line2, state.get("line2", ""))
         set_combo(self.cmb_dut, state.get("dut", ""))
+        set_combo(self.cmb_p370_2xthru, state.get("p370_2xthru", ""))
+        set_combo(self.cmb_p370_fix_dut_fix, state.get("p370_fix_dut_fix", ""))
         set_combo(self.cmb_gate_source, state.get("gate_source", ""))
         set_combo(self.cmb_gate_trace, state.get("gate_trace", ""))
         set_combo(self.cmb_transform, state.get("transform_mode", ""))
@@ -469,6 +559,9 @@ class DeembedMainWindow(QMainWindow):
         self.edit_line2_len.setText(state.get("line2_len", "0.020"))
         self.edit_thru_len.setText(state.get("thru_len", "0.0"))
         self.chk_mirror_sym.setChecked(bool(state.get("mirror_sym", True)))
+        self.chk_p370_dc.setChecked(bool(state.get("p370_dc", True)))
+        self.chk_p370_trim.setChecked(bool(state.get("p370_trim", False)))
+        self.edit_p370_trim_db.setText(state.get("p370_trim_db", "-45"))
         self.edit_gate_center.setText(state.get("gate_center", "0.0"))
         self.edit_gate_span.setText(state.get("gate_span", "0.15e-9"))
         self.edit_gate_start.setText(state.get("gate_start", ""))
@@ -478,6 +571,7 @@ class DeembedMainWindow(QMainWindow):
         self.chk_synth_dc.setChecked(bool(state.get("synthetic_dc", False)))
         self.last_browse_dir = state.get("last_browse_dir", self.last_browse_dir)
         self._update_method_ui()
+        self._update_p370_warning_banner()
 
         if any(state.get(key, "") for key in ("plot_xmin", "plot_xmax", "plot_ymin", "plot_ymax")):
             dialog = self._ensure_plot_limits_dialog()
@@ -515,6 +609,7 @@ class DeembedMainWindow(QMainWindow):
             return
         self.networks.clear()
         self.latest_trl_result = None
+        self.latest_p370_result = None
         self.latest_deembedded_name = None
         self.latest_validation_report = None
         self.project_name = "Untitled Project"
@@ -579,6 +674,7 @@ class DeembedMainWindow(QMainWindow):
             self.networks = networks
             self.latest_deembedded_name = latest_deembedded_name
             self.latest_trl_result = None
+            self.latest_p370_result = None
             self.latest_validation_report = None
             self.project_file = Path(file_path)
             self.last_browse_dir = str(self.project_file.parent)
@@ -718,7 +814,15 @@ class DeembedMainWindow(QMainWindow):
             lbl.setText("-")
 
     def _refresh_network_combos(self):
-        combo_list = [self.cmb_thru, self.cmb_line1, self.cmb_line2, self.cmb_dut, self.cmb_gate_source]
+        combo_list = [
+            self.cmb_thru,
+            self.cmb_line1,
+            self.cmb_line2,
+            self.cmb_dut,
+            self.cmb_p370_2xthru,
+            self.cmb_p370_fix_dut_fix,
+            self.cmb_gate_source,
+        ]
         names = list(self.networks.keys())
         for combo in combo_list:
             current = combo.currentText()
@@ -733,6 +837,7 @@ class DeembedMainWindow(QMainWindow):
                 combo.setCurrentText("(None)")
             combo.blockSignals(False)
         self._update_method_ui()
+        self._update_p370_warning_banner()
 
     def _ensure_unique_name(self, base_name: str) -> str:
         if base_name not in self.networks:
@@ -812,12 +917,60 @@ class DeembedMainWindow(QMainWindow):
     def run_trl(self):
         try:
             method = self.cmb_method.currentText()
-            line1 = self.get_selected_network(self.cmb_line1)
             line1_len = self._parse_optional_float(self.edit_line1_len)
             line2_len = self._parse_optional_float(self.edit_line2_len)
             thru_len = self._parse_optional_float(self.edit_thru_len, default=0.0)
             mirror = self.chk_mirror_sym.isChecked()
 
+            if method == "IEEE P370 2x-thru (NZC)":
+                fix_fix_2xthru = self.get_selected_network(self.cmb_p370_2xthru)
+                fix_dut_fix = self.get_selected_network(self.cmb_p370_fix_dut_fix)
+                dut_name = self._ensure_unique_name(f"{fix_dut_fix.name}_p370_deembedded")
+                trim_db = self._parse_optional_float(self.edit_p370_trim_db, default=-45.0)
+                p370_result = self.p370_engine.deembed(
+                    P370Inputs(
+                        fix_fix_2xthru=fix_fix_2xthru,
+                        fix_dut_fix=fix_dut_fix,
+                        dut_name=dut_name,
+                    ),
+                    P370Config(
+                        mode="SE_NZC_2XTHRU",
+                        use_impedance_correction=False,
+                        auto_extrapolate_dc=self.chk_p370_dc.isChecked(),
+                        auto_trim_near_cutoff=self.chk_p370_trim.isChecked(),
+                        cutoff_trim_s21_db=float(trim_db if trim_db is not None else -45.0),
+                    ),
+                )
+                self.latest_trl_result = None
+                self.latest_p370_result = p370_result
+                if p370_result.split is not None:
+                    left = p370_result.split.left_fixture.copy(name=self._ensure_unique_name(f"{fix_fix_2xthru.name}_left_fixture"))
+                    right = p370_result.split.right_fixture.copy(name=self._ensure_unique_name(f"{fix_fix_2xthru.name}_right_fixture"))
+                    self.networks[left.name] = left
+                    self.networks[right.name] = right
+                if p370_result.deembedded_dut is not None:
+                    p370_result.deembedded_dut.name = self._ensure_unique_name(p370_result.deembedded_dut.name)
+                    self.networks[p370_result.deembedded_dut.name] = p370_result.deembedded_dut
+                    self.latest_deembedded_name = p370_result.deembedded_dut.name
+                existing_names = {self.file_list.item(i).text() for i in range(self.file_list.count())}
+                for name in self.networks:
+                    if name not in existing_names:
+                        self.file_list.addItem(QListWidgetItem(name))
+                self._refresh_network_combos()
+                self.refresh_live_plots()
+                self._mark_dirty(True)
+                if p370_result.self_check is not None and not p370_result.self_check.passed:
+                    self._set_status("IEEE P370 2x-thru (NZC) completed, but self-check failed; inspect the P370 Self-Check tab.")
+                elif p370_result.self_check is not None:
+                    self._set_status(
+                        f"IEEE P370 2x-thru (NZC) completed · self-check pass · max residual {p370_result.self_check.max_abs_mag_db:.4f} dB"
+                    )
+                else:
+                    self._set_status("IEEE P370 2x-thru (NZC) completed")
+                self.run_validation(auto=True)
+                return
+
+            line1 = self.get_selected_network(self.cmb_line1)
             if method == "Single-line TRL":
                 thru = self.get_selected_network(self.cmb_thru)
                 dut = self.get_selected_network(self.cmb_dut, allow_none=True)
@@ -858,10 +1011,12 @@ class DeembedMainWindow(QMainWindow):
                 raise NotImplementedError("Known Fixture De-cascade panel wiring can be added next")
 
             self.latest_trl_result = result
+            self.latest_p370_result = None
             if result.deembedded_dut is not None:
                 result.deembedded_dut.name = self._ensure_unique_name(result.deembedded_dut.name)
                 self.networks[result.deembedded_dut.name] = result.deembedded_dut
-                self.file_list.addItem(QListWidgetItem(result.deembedded_dut.name))
+                if self.file_list.findItems(result.deembedded_dut.name, Qt.MatchExactly) == []:
+                    self.file_list.addItem(QListWidgetItem(result.deembedded_dut.name))
                 self.latest_deembedded_name = result.deembedded_dut.name
                 self._refresh_network_combos()
                 self.cmb_dut.setCurrentText(result.deembedded_dut.name)
@@ -871,7 +1026,7 @@ class DeembedMainWindow(QMainWindow):
             self._set_status(f"{method} completed")
             self.run_validation(auto=True)
         except Exception as exc:
-            self.show_error("TRL Solve Failed", exc)
+            self.show_error("Solve Failed", exc)
 
     # ------------------------------------------------------------------
     # Validation
@@ -967,12 +1122,25 @@ class DeembedMainWindow(QMainWindow):
                 td_results = [self.time_gating.to_time_domain(ntwk, i=i, j=j, cfg=gate_cfg) for ntwk in selected_networks]
                 fig_t = self.plotter.plot_time_domain_overlay(td_results, gate_start_s=gate_start, gate_stop_s=gate_stop)
                 self.panel_time.set_figure(fig_t)
-                if self.latest_trl_result is not None and self.latest_trl_result.alpha_np_per_m is not None:
+                if self.latest_p370_result is not None and self.latest_p370_result.self_check is not None and self.latest_p370_result.split is not None:
+                    self.panel_trl.set_figure(self.plotter.plot_p370_self_check(self.latest_p370_result))
+                    if self.latest_p370_result.deembedded_dut is not None and self.latest_p370_result.preprocess is not None:
+                        self.panel_validation.set_figure(
+                            self.plotter.plot_p370_deembed_overlay(
+                                self.latest_p370_result.preprocess.fix_dut_fix,
+                                self.latest_p370_result.deembedded_dut,
+                                title="P370 De-embedding Result",
+                            )
+                        )
+                    else:
+                        self.panel_validation.clear()
+                elif self.latest_trl_result is not None and self.latest_trl_result.alpha_np_per_m is not None:
                     fig_trl = self.plotter.plot_trl_diagnostics(self.latest_trl_result, selected_networks[0].freq_hz)
                     self.panel_trl.set_figure(fig_trl)
+                    self.panel_validation.clear()
                 else:
                     self.panel_trl.clear()
-                self.panel_validation.clear()
+                    self.panel_validation.clear()
                 self._set_status(f"Overlaying {len(selected_networks)} files")
                 return
 
@@ -989,13 +1157,23 @@ class DeembedMainWindow(QMainWindow):
             fig_t = self.plotter.plot_time_domain(td, gate_start_s=gate_start, gate_stop_s=gate_stop)
             self.panel_time.set_figure(fig_t)
 
-            if self.latest_trl_result is not None and self.latest_trl_result.alpha_np_per_m is not None:
+            if self.latest_p370_result is not None and self.latest_p370_result.self_check is not None and self.latest_p370_result.split is not None:
+                self.panel_trl.set_figure(self.plotter.plot_p370_self_check(self.latest_p370_result))
+            elif self.latest_trl_result is not None and self.latest_trl_result.alpha_np_per_m is not None:
                 fig_trl = self.plotter.plot_trl_diagnostics(self.latest_trl_result, ntwk.freq_hz)
                 self.panel_trl.set_figure(fig_trl)
             else:
                 self.panel_trl.clear()
 
-            if self.latest_deembedded_name:
+            if self.latest_p370_result is not None and self.latest_p370_result.deembedded_dut is not None and self.latest_p370_result.preprocess is not None:
+                self.panel_validation.set_figure(
+                    self.plotter.plot_p370_deembed_overlay(
+                        self.latest_p370_result.preprocess.fix_dut_fix,
+                        self.latest_p370_result.deembedded_dut,
+                        title="P370 De-embedding Result",
+                    )
+                )
+            elif self.latest_deembedded_name:
                 de = self.networks.get(self.latest_deembedded_name)
                 raw_for_validation = self.get_selected_network(self.cmb_dut, allow_none=True)
                 if de is not None and raw_for_validation is not None and raw_for_validation.same_grid_as(de):
@@ -1038,21 +1216,56 @@ class DeembedMainWindow(QMainWindow):
         is_short_long = method == "Short/Long Differential"
         is_multiline = method == "Multiline TRL"
         is_single = method == "Single-line TRL"
+        is_p370 = method == "IEEE P370 2x-thru (NZC)"
 
-        self.cmb_thru.setEnabled(not is_short_long)
-        self.edit_thru_len.setEnabled(not is_short_long)
-        if is_short_long and self.cmb_thru.findText("(None)") >= 0:
+        self.cmb_thru.setEnabled(not is_short_long and not is_p370)
+        self.edit_thru_len.setEnabled(not is_short_long and not is_p370)
+        if (is_short_long or is_p370) and self.cmb_thru.findText("(None)") >= 0:
             self.cmb_thru.setCurrentText("(None)")
 
-        self.cmb_line2.setEnabled(is_multiline or is_short_long)
-        self.edit_line2_len.setEnabled(is_multiline or is_short_long)
-        self.cmb_dut.setEnabled(not is_short_long)
+        self.cmb_line1.setEnabled(not is_p370)
+        self.edit_line1_len.setEnabled(not is_p370)
+        self.cmb_line2.setEnabled((is_multiline or is_short_long) and not is_p370)
+        self.edit_line2_len.setEnabled((is_multiline or is_short_long) and not is_p370)
+        self.cmb_dut.setEnabled(not is_short_long and not is_p370)
+        self.chk_mirror_sym.setEnabled(not is_p370)
+
+        for label, widget in [
+            (self.lbl_p370_2xthru, self.cmb_p370_2xthru),
+            (self.lbl_p370_fix_dut_fix, self.cmb_p370_fix_dut_fix),
+            (self.lbl_p370_dc, self.chk_p370_dc),
+            (self.lbl_p370_trim, self.chk_p370_trim),
+            (self.lbl_p370_trim_db, self.edit_p370_trim_db),
+        ]:
+            label.setVisible(is_p370)
+            widget.setVisible(is_p370)
+
+        for label, widget in [
+            (self.lbl_thru, self.cmb_thru),
+            (self.lbl_line1, self.cmb_line1),
+            (self.lbl_line1_len, self.edit_line1_len),
+            (self.lbl_line2, self.cmb_line2),
+            (self.lbl_line2_len, self.edit_line2_len),
+            (self.lbl_thru_len, self.edit_thru_len),
+            (self.lbl_dut, self.cmb_dut),
+            (self.lbl_symmetry, self.chk_mirror_sym),
+        ]:
+            label.setVisible(not is_p370)
+            widget.setVisible(not is_p370)
 
         self.edit_line1_len.setPlaceholderText("Length in meters")
         self.edit_line2_len.setPlaceholderText("Length in meters")
         self.edit_thru_len.setPlaceholderText("0 for ideal thru")
+        self.btn_run_trl.setText("Run P370" if is_p370 else "Solve / De-embed")
+        self.btn_solve_toolbar.setText("Run P370" if is_p370 else "Run TRL")
+        self.plot_tabs.setTabText(2, "P370 Self-Check" if is_p370 else "TRL Diagnostics")
+        self.plot_tabs.setTabText(3, "P370 Result" if is_p370 else "Validation")
+        self.lbl_p370_warning.setVisible(is_p370 and self.lbl_p370_warning.text().strip() != "")
+        self._update_p370_warning_banner()
 
-        if is_short_long:
+        if is_p370:
+            self._set_status("IEEE P370 2x-thru (NZC) selected: choose a 2x-thru file and a FIX-DUT-FIX file, then run de-embedding.")
+        elif is_short_long:
             self.edit_line1_len.setPlaceholderText("Short physical length in meters (needed for Solve)")
             self.edit_line2_len.setPlaceholderText("Long physical length in meters (needed for Solve)")
             self._set_status("Short/Long Differential selected: THRU disabled. Use S11/S22 time-gating visually first; enter lengths only when solving.")
@@ -1060,6 +1273,76 @@ class DeembedMainWindow(QMainWindow):
             self._set_status("Single-line TRL selected")
         elif is_multiline:
             self._set_status("Multiline TRL selected")
+
+    def _update_p370_warning_banner(self):
+        if self.cmb_method.currentText() != "IEEE P370 2x-thru (NZC)":
+            self.lbl_p370_warning.setVisible(False)
+            self.lbl_p370_warning.clear()
+            return
+
+        fix_fix = self.get_selected_network(self.cmb_p370_2xthru, allow_none=True)
+        fix_dut = self.get_selected_network(self.cmb_p370_fix_dut_fix, allow_none=True)
+        if fix_fix is None:
+            self.lbl_p370_warning.setVisible(False)
+            self.lbl_p370_warning.clear()
+            return
+
+        freq = np.asarray(fix_fix.freq_hz, dtype=float)
+        if freq.size < 3:
+            self.lbl_p370_warning.setVisible(False)
+            self.lbl_p370_warning.clear()
+            return
+
+        df = float(np.mean(np.diff(freq))) if freq.size >= 2 else 0.0
+        start_hz = float(freq[0])
+        stop_hz = float(freq[-1])
+        start_ratio = start_hz / max(df, 1e-30)
+        band_fraction = start_hz / max(stop_hz, 1e-30)
+        trim_db = self._parse_optional_float(self.edit_p370_trim_db, default=-45.0)
+        trim_db = float(trim_db if trim_db is not None else -45.0)
+
+        lead_pts = max(3, min(8, len(freq)))
+        fix_lead_db = float(np.median(20.0 * np.log10(np.abs(fix_fix.s[:lead_pts, 1, 0]) + 1e-30)))
+        dut_lead_db = None
+        if fix_dut is not None and fix_dut.n_freq >= lead_pts:
+            dut_lead_db = float(np.median(20.0 * np.log10(np.abs(fix_dut.s[:lead_pts, 1, 0]) + 1e-30)))
+
+        starts_far_from_dc = start_ratio > 10.0 and band_fraction > 0.02
+        weak_leading_transmission = fix_lead_db < trim_db or (dut_lead_db is not None and dut_lead_db < trim_db)
+        likely_waveguide = (start_hz >= 40e9 and starts_far_from_dc) or weak_leading_transmission
+        high_pass_detected = starts_far_from_dc or likely_waveguide
+
+        if not high_pass_detected:
+            self.lbl_p370_warning.setVisible(False)
+            self.lbl_p370_warning.clear()
+            return
+
+        mode_text = "waveguide/high-pass" if likely_waveguide else "high-pass"
+        dc_enabled = self.chk_p370_dc.isChecked()
+        trim_enabled = self.chk_p370_trim.isChecked()
+        trim_hint = "enabled" if trim_enabled else "disabled"
+        dc_hint = "currently enabled" if dc_enabled else "currently disabled"
+        extra = []
+        if weak_leading_transmission:
+            extra.append(f"low-end |S21| is weak (~{fix_lead_db:.1f} dB on the 2x-thru)")
+        extra.append(f"start frequency is {start_hz/1e9:.3f} GHz")
+        detail = "; ".join(extra)
+        self.lbl_p370_warning.setText(
+            "⚠️ P370 warning: a "
+            f"{mode_text} band was detected ({detail}). DC extrapolation is discouraged for this dataset and is {dc_hint}. "
+            f"Recommended: leave DC extrapolation off and use near-cutoff trimming ({trim_hint}) when the first points are unstable."
+        )
+        if dc_enabled:
+            self.lbl_p370_warning.setStyleSheet(
+                "QLabel { background-color: #fff3cd; color: #7a4b00; border: 1px solid #e0b84b; "
+                "border-radius: 4px; padding: 8px; font-weight: 600; }"
+            )
+        else:
+            self.lbl_p370_warning.setStyleSheet(
+                "QLabel { background-color: #e8f4fd; color: #0b5394; border: 1px solid #86b7d8; "
+                "border-radius: 4px; padding: 8px; font-weight: 600; }"
+            )
+        self.lbl_p370_warning.setVisible(True)
 
     def _ensure_plot_limits_dialog(self) -> PlotLimitsDialog:
         if self.plot_limits_dialog is None:

@@ -246,6 +246,118 @@ class PlotGenerator:
         fig.tight_layout()
         return fig
 
+    def plot_p370_self_check(self, p370_result, title: str = "P370 Self-Check and Residuals"):
+        if p370_result.split is None or p370_result.self_check is None:
+            raise ValueError("P370 result does not contain split/self-check data")
+
+        midpoint = p370_result.split.midpoint
+        self_check = p370_result.self_check
+        cfg = p370_result.config
+        freq_hz = self_check.self_deembedded_2xthru.freq_hz
+        f_ghz = freq_hz / 1e9
+
+        fig, axes = plt.subplots(2, 2, figsize=(12.2, 8.8), sharex=False)
+        fig.suptitle(title)
+        ax_mid, ax_mag, ax_phase, ax_tdr = axes.ravel()
+
+        ax_mid.plot(midpoint.time_axis_s * 1e9, np.real(midpoint.t12_step_response), color="tab:purple", lw=1.5, label="T12 step")
+        ax_mid.axvline(midpoint.midpoint_time_s * 1e9, color="tab:red", ls="--", lw=1.2, label="midpoint")
+        ax_mid.set_ylabel("Step amplitude")
+        ax_mid.set_xlabel("Time (ns)")
+        ax_mid.set_title("Midpoint Detection")
+        ax_mid.grid(True, alpha=0.3)
+        ax_mid.legend(loc="best")
+
+        ax_mag.plot(f_ghz, self_check.residual_mag_db, color="tab:green", lw=1.5, label="self residual |S21| (dB)")
+        ax_mag.axhline(0.0, color="0.5", lw=0.8)
+        ax_mag.axhline(cfg.max_self_residual_db, color="tab:red", lw=1.0, ls="--", label="limit")
+        ax_mag.axhline(-cfg.max_self_residual_db, color="tab:red", lw=1.0, ls="--")
+        ax_mag.set_ylabel("Magnitude (dB)")
+        ax_mag.set_xlabel("Frequency (GHz)")
+        ax_mag.set_title(f"Residual Magnitude · max={self_check.max_abs_mag_db:.4f} dB")
+        ax_mag.grid(True, alpha=0.3)
+        ax_mag.legend(loc="best")
+
+        ax_phase.plot(f_ghz, self_check.residual_phase_deg, color="tab:blue", lw=1.5, label="self residual phase")
+        ax_phase.axhline(0.0, color="0.5", lw=0.8)
+        ax_phase.axhline(cfg.max_self_phase_deg, color="tab:red", lw=1.0, ls="--", label="limit")
+        ax_phase.axhline(-cfg.max_self_phase_deg, color="tab:red", lw=1.0, ls="--")
+        ax_phase.set_ylabel("Phase (deg)")
+        ax_phase.set_xlabel("Frequency (GHz)")
+        ax_phase.set_title(f"Residual Phase · max={self_check.max_abs_phase_deg:.4f}°")
+        ax_phase.grid(True, alpha=0.3)
+        ax_phase.legend(loc="best")
+
+        tdr_err = self_check.tdr_match_error_pct
+        if tdr_err is not None and len(tdr_err):
+            ax_tdr.plot(np.arange(len(tdr_err)), tdr_err, color="tab:orange", lw=1.4, label="fixture TDR mismatch")
+            ax_tdr.axhline(cfg.max_tdr_impedance_error_pct, color="tab:red", lw=1.0, ls="--", label="limit")
+            ax_tdr.set_ylabel("Mismatch (%)")
+            ax_tdr.set_xlabel("Validation sample")
+            ax_tdr.set_title(
+                f"Fixture TDR Similarity · max={float(self_check.details.get('max_tdr_match_error_pct', 0.0)):.3f}%"
+            )
+            ax_tdr.grid(True, alpha=0.3)
+            ax_tdr.legend(loc="best")
+        else:
+            ax_tdr.axis("off")
+            summary = [
+                f"Self-check: {'PASS' if self_check.passed else 'FAIL'}",
+                f"Max |mag| residual: {self_check.max_abs_mag_db:.4f} dB",
+                f"Max |phase| residual: {self_check.max_abs_phase_deg:.4f}°",
+            ]
+            if self_check.warnings:
+                summary.extend(self_check.warnings[:3])
+            ax_tdr.text(0.02, 0.95, "\n".join(summary), va="top", ha="left", fontsize=10)
+
+        fig.tight_layout()
+        return fig
+
+    def plot_p370_deembed_overlay(
+        self,
+        fix_dut_fix: SParameterData,
+        deembedded_dut: SParameterData,
+        title: str = "P370 De-embedding Result",
+    ):
+        fix_dut_fix, deembedded_dut = self._overlap_networks(fix_dut_fix, deembedded_dut)
+        fix_dut_fix.check_2port()
+        deembedded_dut.check_2port()
+
+        f_ghz = fix_dut_fix.freq_hz / 1e9
+        fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True)
+        fig.suptitle(title)
+
+        axes[0, 0].plot(f_ghz, fix_dut_fix.magnitude_db(1, 0), color="0.4", lw=1.5, label="FIX-DUT-FIX S21")
+        axes[0, 0].plot(f_ghz, deembedded_dut.magnitude_db(1, 0), color="tab:green", lw=1.4, label="de-embedded DUT S21")
+        axes[0, 0].set_title("Insertion")
+        axes[0, 0].set_ylabel("Magnitude (dB)")
+        axes[0, 0].grid(True, alpha=0.3)
+        axes[0, 0].legend(loc="best")
+
+        axes[0, 1].plot(f_ghz, fix_dut_fix.magnitude_db(0, 0), color="0.4", lw=1.5, label="FIX-DUT-FIX S11")
+        axes[0, 1].plot(f_ghz, deembedded_dut.magnitude_db(0, 0), color="tab:orange", lw=1.4, label="de-embedded DUT S11")
+        axes[0, 1].set_title("Return")
+        axes[0, 1].set_ylabel("Magnitude (dB)")
+        axes[0, 1].grid(True, alpha=0.3)
+        axes[0, 1].legend(loc="best")
+
+        axes[1, 0].plot(f_ghz, deembedded_dut.phase_deg(1, 0, unwrap=True), color="tab:blue", lw=1.4, label="de-embedded DUT S21 phase")
+        axes[1, 0].set_title("De-embedded S21 Phase")
+        axes[1, 0].set_ylabel("Phase (deg)")
+        axes[1, 0].set_xlabel("Frequency (GHz)")
+        axes[1, 0].grid(True, alpha=0.3)
+        axes[1, 0].legend(loc="best")
+
+        axes[1, 1].plot(f_ghz, deembedded_dut.magnitude_db(0, 1), color="tab:red", lw=1.4, label="de-embedded DUT S12")
+        axes[1, 1].set_title("De-embedded S12 Magnitude")
+        axes[1, 1].set_ylabel("Magnitude (dB)")
+        axes[1, 1].set_xlabel("Frequency (GHz)")
+        axes[1, 1].grid(True, alpha=0.3)
+        axes[1, 1].legend(loc="best")
+
+        fig.tight_layout()
+        return fig
+
     @staticmethod
     def save(fig, file_path: str, dpi: int = 140):
         fig.savefig(file_path, dpi=dpi, bbox_inches="tight")
@@ -254,3 +366,15 @@ class PlotGenerator:
     def _ensure_same_grid(a: SParameterData, b: SParameterData):
         if not a.same_grid_as(b):
             raise ValueError(f"Frequency grids differ: '{a.name}' vs '{b.name}'")
+
+    @staticmethod
+    def _overlap_networks(a: SParameterData, b: SParameterData) -> tuple[SParameterData, SParameterData]:
+        if a.same_grid_as(b):
+            return a, b
+        start = max(float(a.freq_hz[0]), float(b.freq_hz[0]))
+        stop = min(float(a.freq_hz[-1]), float(b.freq_hz[-1]))
+        if stop <= start:
+            raise ValueError(f"Frequency ranges do not overlap: '{a.name}' vs '{b.name}'")
+        n = min(a.n_freq, b.n_freq)
+        freq = np.linspace(start, stop, n)
+        return a.interpolate_to(freq, name=a.name), b.interpolate_to(freq, name=b.name)
