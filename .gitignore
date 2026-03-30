@@ -1,0 +1,31 @@
+# Python cache / build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test / analysis cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local generated outputs from this project
+state_smoke/
+*.zip
+demo_outputs/*.png
+demo_outputs/*_deembedded.s2p
+
+# OS/editor noise
+.DS_Store
+Thumbs.db

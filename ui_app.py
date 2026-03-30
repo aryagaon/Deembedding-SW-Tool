@@ -39,6 +39,7 @@ from rfdeembed import (
     SParameterData,
     TRLDeembedder,
     TRLConfig,
+    TRLResult,
     TimeGating,
     GateConfig,
     PlotGenerator,
@@ -1007,8 +1008,30 @@ class DeembedMainWindow(QMainWindow):
                     short_length_m=line1_len,
                     long_length_m=line2_len,
                 )
+            elif method == "Known Fixture De-cascade":
+                left_fixture = self.get_selected_network(self.cmb_line1)
+                right_fixture = self.get_selected_network(self.cmb_line2)
+                dut = self.get_selected_network(self.cmb_dut)
+                if not dut.same_grid_as(left_fixture) or not dut.same_grid_as(right_fixture):
+                    raise ValueError(
+                        "Known Fixture De-cascade requires the measured DUT, left fixture, and right fixture to share the same frequency grid."
+                    )
+                result = TRLResult(
+                    left_fixture=left_fixture.copy(name="left_fixture"),
+                    right_fixture=right_fixture.copy(name="right_fixture"),
+                    deembedded_dut=self.trl_engine.deembed_with_fixtures(
+                        dut,
+                        left_fixture,
+                        right_fixture,
+                        name=f"{dut.name}_decascaded",
+                    ),
+                    notes=[
+                        "Known-fixture de-cascade completed",
+                        "Left and right fixtures were supplied directly rather than extracted from standards",
+                    ],
+                )
             else:
-                raise NotImplementedError("Known Fixture De-cascade panel wiring can be added next")
+                raise ValueError(f"Unsupported method: {method}")
 
             self.latest_trl_result = result
             self.latest_p370_result = None
@@ -1216,19 +1239,47 @@ class DeembedMainWindow(QMainWindow):
         is_short_long = method == "Short/Long Differential"
         is_multiline = method == "Multiline TRL"
         is_single = method == "Single-line TRL"
+        is_known_fixture = method == "Known Fixture De-cascade"
         is_p370 = method == "IEEE P370 2x-thru (NZC)"
+        is_trl_like = is_single or is_multiline
 
-        self.cmb_thru.setEnabled(not is_short_long and not is_p370)
-        self.edit_thru_len.setEnabled(not is_short_long and not is_p370)
-        if (is_short_long or is_p370) and self.cmb_thru.findText("(None)") >= 0:
+        self.lbl_thru.setText("THRU")
+        self.lbl_line1.setText("LINE 1")
+        self.lbl_line1_len.setText("LINE 1 length (m)")
+        self.lbl_line2.setText("LINE 2")
+        self.lbl_line2_len.setText("LINE 2 length (m)")
+        self.lbl_thru_len.setText("THRU length (m)")
+        self.lbl_dut.setText("DUT")
+        self.lbl_symmetry.setText("Symmetry")
+
+        show_thru = is_trl_like
+        show_line1 = not is_p370
+        show_line2 = is_multiline or is_short_long or is_known_fixture
+        show_line1_len = is_trl_like or is_short_long
+        show_line2_len = is_multiline or is_short_long
+        show_thru_len = is_trl_like
+        show_dut = not is_short_long and not is_p370
+        show_symmetry = is_trl_like
+
+        if is_short_long:
+            self.lbl_line1.setText("Short line")
+            self.lbl_line2.setText("Long line")
+        elif is_known_fixture:
+            self.lbl_line1.setText("Left fixture")
+            self.lbl_line2.setText("Right fixture")
+            self.lbl_dut.setText("Measured FIX-DUT-FIX")
+
+        self.cmb_thru.setEnabled(show_thru)
+        self.edit_thru_len.setEnabled(show_thru_len)
+        if not show_thru and self.cmb_thru.findText("(None)") >= 0:
             self.cmb_thru.setCurrentText("(None)")
 
-        self.cmb_line1.setEnabled(not is_p370)
-        self.edit_line1_len.setEnabled(not is_p370)
-        self.cmb_line2.setEnabled((is_multiline or is_short_long) and not is_p370)
-        self.edit_line2_len.setEnabled((is_multiline or is_short_long) and not is_p370)
-        self.cmb_dut.setEnabled(not is_short_long and not is_p370)
-        self.chk_mirror_sym.setEnabled(not is_p370)
+        self.cmb_line1.setEnabled(show_line1)
+        self.edit_line1_len.setEnabled(show_line1_len)
+        self.cmb_line2.setEnabled(show_line2)
+        self.edit_line2_len.setEnabled(show_line2_len)
+        self.cmb_dut.setEnabled(show_dut)
+        self.chk_mirror_sym.setEnabled(show_symmetry)
 
         for label, widget in [
             (self.lbl_p370_2xthru, self.cmb_p370_2xthru),
@@ -1240,24 +1291,36 @@ class DeembedMainWindow(QMainWindow):
             label.setVisible(is_p370)
             widget.setVisible(is_p370)
 
-        for label, widget in [
-            (self.lbl_thru, self.cmb_thru),
-            (self.lbl_line1, self.cmb_line1),
-            (self.lbl_line1_len, self.edit_line1_len),
-            (self.lbl_line2, self.cmb_line2),
-            (self.lbl_line2_len, self.edit_line2_len),
-            (self.lbl_thru_len, self.edit_thru_len),
-            (self.lbl_dut, self.cmb_dut),
-            (self.lbl_symmetry, self.chk_mirror_sym),
+        for label, widget, visible in [
+            (self.lbl_thru, self.cmb_thru, show_thru),
+            (self.lbl_line1, self.cmb_line1, show_line1),
+            (self.lbl_line1_len, self.edit_line1_len, show_line1_len),
+            (self.lbl_line2, self.cmb_line2, show_line2),
+            (self.lbl_line2_len, self.edit_line2_len, show_line2_len),
+            (self.lbl_thru_len, self.edit_thru_len, show_thru_len),
+            (self.lbl_dut, self.cmb_dut, show_dut),
+            (self.lbl_symmetry, self.chk_mirror_sym, show_symmetry),
         ]:
-            label.setVisible(not is_p370)
-            widget.setVisible(not is_p370)
+            label.setVisible(visible)
+            widget.setVisible(visible)
 
         self.edit_line1_len.setPlaceholderText("Length in meters")
         self.edit_line2_len.setPlaceholderText("Length in meters")
         self.edit_thru_len.setPlaceholderText("0 for ideal thru")
-        self.btn_run_trl.setText("Run P370" if is_p370 else "Solve / De-embed")
-        self.btn_solve_toolbar.setText("Run P370" if is_p370 else "Run TRL")
+        if is_short_long:
+            self.edit_line1_len.setPlaceholderText("Short physical length in meters (needed for Solve)")
+            self.edit_line2_len.setPlaceholderText("Long physical length in meters (needed for Solve)")
+
+        if is_p370:
+            self.btn_run_trl.setText("Run P370")
+            self.btn_solve_toolbar.setText("Run P370")
+        elif is_known_fixture:
+            self.btn_run_trl.setText("De-cascade")
+            self.btn_solve_toolbar.setText("De-cascade")
+        else:
+            self.btn_run_trl.setText("Solve / De-embed")
+            self.btn_solve_toolbar.setText("Run TRL")
+
         self.plot_tabs.setTabText(2, "P370 Self-Check" if is_p370 else "TRL Diagnostics")
         self.plot_tabs.setTabText(3, "P370 Result" if is_p370 else "Validation")
         self.lbl_p370_warning.setVisible(is_p370 and self.lbl_p370_warning.text().strip() != "")
@@ -1266,9 +1329,9 @@ class DeembedMainWindow(QMainWindow):
         if is_p370:
             self._set_status("IEEE P370 2x-thru (NZC) selected: choose a 2x-thru file and a FIX-DUT-FIX file, then run de-embedding.")
         elif is_short_long:
-            self.edit_line1_len.setPlaceholderText("Short physical length in meters (needed for Solve)")
-            self.edit_line2_len.setPlaceholderText("Long physical length in meters (needed for Solve)")
             self._set_status("Short/Long Differential selected: THRU disabled. Use S11/S22 time-gating visually first; enter lengths only when solving.")
+        elif is_known_fixture:
+            self._set_status("Known Fixture De-cascade selected: choose left fixture, right fixture, and measured FIX-DUT-FIX networks on the same frequency grid.")
         elif is_single:
             self._set_status("Single-line TRL selected")
         elif is_multiline:
