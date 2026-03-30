@@ -231,12 +231,16 @@ class DeembedMainWindow(QMainWindow):
         self.btn_import_toolbar = QPushButton("Import Files")
         self.btn_refresh_plots = QPushButton("Refresh Plots")
         self.btn_solve_toolbar = QPushButton("Run TRL")
+        self.btn_export_deembedded = QPushButton("Export De-embedded S2P")
         self.btn_validate_toolbar = QPushButton("Run Validation")
         self.btn_plot_limits = QPushButton("Plot Limits")
+        self.btn_export_deembedded.setEnabled(False)
+        self.btn_export_deembedded.setToolTip("Run a de-embedding workflow first to export the latest 2-port result.")
         toolbar.addWidget(self.btn_import_toolbar)
         toolbar.addSeparator()
         toolbar.addWidget(self.btn_refresh_plots)
         toolbar.addWidget(self.btn_solve_toolbar)
+        toolbar.addWidget(self.btn_export_deembedded)
         toolbar.addWidget(self.btn_validate_toolbar)
         toolbar.addWidget(self.btn_plot_limits)
 
@@ -313,6 +317,9 @@ class DeembedMainWindow(QMainWindow):
         )
 
         self.btn_run_trl = QPushButton("Solve / De-embed")
+        self.btn_export_deembedded_panel = QPushButton("Export De-embedded S2P")
+        self.btn_export_deembedded_panel.setEnabled(False)
+        self.btn_export_deembedded_panel.setToolTip("Run a de-embedding workflow first to export the latest 2-port result.")
 
         self.lbl_thru = QLabel("THRU")
         self.lbl_line1 = QLabel("LINE 1")
@@ -343,7 +350,10 @@ class DeembedMainWindow(QMainWindow):
         layout.addRow(self.lbl_p370_trim, self.chk_p370_trim)
         layout.addRow(self.lbl_p370_trim_db, self.edit_p370_trim_db)
         layout.addRow(self.lbl_p370_warning)
-        layout.addRow(self.btn_run_trl)
+        run_row = QHBoxLayout()
+        run_row.addWidget(self.btn_run_trl)
+        run_row.addWidget(self.btn_export_deembedded_panel)
+        layout.addRow(run_row)
         return group
 
     def _build_gating_group(self) -> QGroupBox:
@@ -474,6 +484,8 @@ class DeembedMainWindow(QMainWindow):
         self.btn_refresh_plots.clicked.connect(self.refresh_live_plots)
         self.btn_run_trl.clicked.connect(self.run_trl)
         self.btn_solve_toolbar.clicked.connect(self.run_trl)
+        self.btn_export_deembedded.clicked.connect(self.export_deembedded_s2p)
+        self.btn_export_deembedded_panel.clicked.connect(self.export_deembedded_s2p)
         self.btn_validate_toolbar.clicked.connect(self.run_validation)
         self.btn_run_validation.clicked.connect(self.run_validation)
         self.btn_clear_validation.clicked.connect(self.clear_validation_widgets)
@@ -499,6 +511,52 @@ class DeembedMainWindow(QMainWindow):
     def _mark_dirty(self, dirty: bool = True):
         self.dirty = dirty
         self._update_window_title()
+
+    def _latest_deembedded_network(self) -> Optional[SParameterData]:
+        if not self.latest_deembedded_name:
+            return None
+        return self.networks.get(self.latest_deembedded_name)
+
+    def _update_export_button_state(self):
+        ntwk = self._latest_deembedded_network()
+        enabled = ntwk is not None and ntwk.n_ports == 2
+        tooltip = (
+            f"Export the latest de-embedded 2-port result ('{ntwk.name}') to Touchstone."
+            if enabled
+            else "Run a de-embedding workflow first to export the latest 2-port result."
+        )
+        for btn in (self.btn_export_deembedded, self.btn_export_deembedded_panel):
+            btn.setEnabled(enabled)
+            btn.setToolTip(tooltip)
+
+    def export_deembedded_s2p(self) -> bool:
+        ntwk = self._latest_deembedded_network()
+        if ntwk is None:
+            self.show_error("Export Failed", ValueError("No de-embedded network is available yet. Run a de-embedding workflow first."))
+            return False
+        if ntwk.n_ports != 2:
+            self.show_error("Export Failed", ValueError("Direct export currently supports only de-embedded 2-port S2P results."))
+            return False
+
+        suggested = Path(self.last_browse_dir) / f"{ntwk.name}.s2p"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export De-embedded S2P",
+            str(suggested),
+            "Touchstone S2P (*.s2p)",
+        )
+        if not file_path:
+            return False
+
+        try:
+            target_path = Path(file_path)
+            ntwk.to_touchstone(target_path)
+            self.last_browse_dir = str(target_path.resolve().parent)
+            self._set_status(f"Exported de-embedded S2P to {target_path}")
+            return True
+        except Exception as exc:
+            self.show_error("Export Failed", exc)
+            return False
 
     def collect_ui_state(self) -> dict:
         return {
@@ -624,6 +682,7 @@ class DeembedMainWindow(QMainWindow):
         self.panel_trl.clear()
         self.panel_validation.clear()
         self._mark_dirty(False)
+        self._update_export_button_state()
         self._set_status("New project created")
 
     def save_project(self) -> bool:
@@ -689,6 +748,7 @@ class DeembedMainWindow(QMainWindow):
             if self.file_list.count() > 0 and self.file_list.currentItem() is None:
                 self.file_list.setCurrentRow(0)
             self._mark_dirty(False)
+            self._update_export_button_state()
             self.refresh_live_plots()
             self._set_status(f"Loaded project from {self.project_file}")
         except Exception as exc:
@@ -736,6 +796,7 @@ class DeembedMainWindow(QMainWindow):
             self.file_list.setCurrentRow(0)
         if added:
             self._mark_dirty(True)
+        self._update_export_button_state()
         self._set_status(f"Imported {added} file(s)")
 
         if errors:
@@ -756,6 +817,7 @@ class DeembedMainWindow(QMainWindow):
         self.clear_validation_widgets()
         self.refresh_live_plots()
         self._mark_dirty(True)
+        self._update_export_button_state()
         self._set_status(f"Removed {name}")
 
     def on_file_selection_changed(self, current: Optional[QListWidgetItem], previous: Optional[QListWidgetItem]):
@@ -960,6 +1022,7 @@ class DeembedMainWindow(QMainWindow):
                 self._refresh_network_combos()
                 self.refresh_live_plots()
                 self._mark_dirty(True)
+                self._update_export_button_state()
                 if p370_result.self_check is not None and not p370_result.self_check.passed:
                     self._set_status("IEEE P370 2x-thru (NZC) completed, but self-check failed; inspect the P370 Self-Check tab.")
                 elif p370_result.self_check is not None:
@@ -1046,6 +1109,7 @@ class DeembedMainWindow(QMainWindow):
 
             self.refresh_live_plots()
             self._mark_dirty(True)
+            self._update_export_button_state()
             self._set_status(f"{method} completed")
             self.run_validation(auto=True)
         except Exception as exc:

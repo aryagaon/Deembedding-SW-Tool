@@ -54,6 +54,8 @@ Main window with the scrollable control pane, P370 warning banner, plotting tabs
   - time-domain plots
   - TRL diagnostics
   - IEEE P370 self-check residual plots
+- Direct result export:
+  - export the latest de-embedded 2-port result directly as `.s2p` from the GUI
 - D-band / high-pass safety improvements for P370:
   - near-cutoff trimming
   - NaN/Inf checks with clearer error messages
@@ -114,8 +116,9 @@ python ui_app.py
 2. Choose a method in the **Method Selection / TRL Setup** panel.
 3. Select the required standards or fixture files.
 4. Click **Solve / De-embed** or **Run P370**.
-5. Review the plots in the tabs on the right.
-6. Check the validation panel and warnings.
+5. If the result looks good, click **Export De-embedded S2P** to save the latest 2-port de-embedded result directly.
+6. Review the plots in the tabs on the right.
+7. Check the validation panel and warnings.
 
 ## What the methods are for
 
